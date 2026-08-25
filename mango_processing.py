@@ -1,328 +1,563 @@
 import cv2 as cv
 import numpy as np
+
 from skimage.feature import local_binary_pattern
+from tqdm.notebook import tqdm
 
-# 1. IMAGE ENHANCEMENT: CLAGC
-def apply_clagc(img_bgr):
+
+# =========================================================
+# 2. RESIZE WITH ASPECT RATIO + PADDING
+# =========================================================
+
+def resize_with_padding(img, target_size=224):
     """
-    Combines Gamma Correction and CLAHE
-    for balanced brightness and local contrast.
+    Resize image while preserving aspect ratio.
+    Padding is added instead of stretching the mango.
     """
 
-    hsv = cv.cvtColor(img_bgr, cv.COLOR_BGR2HSV)
+    h, w = img.shape[:2]
 
-    h, s, v = cv.split(hsv)
+    if h == 0 or w == 0:
+        return None
 
-    # Adaptive Gamma Adjustment
-    mean_v = np.mean(v) / 255.0
+    scale = min(target_size / w, target_size / h)
 
-    gamma = np.log(0.5) / np.log(mean_v + 1e-5)
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
 
-    v_gamma = np.uint8(
-        np.clip(
-            np.power(v / 255.0, gamma) * 255.0,
-            0,
-            255
-        )
+    interpolation = (
+        cv.INTER_AREA
+        if scale < 1
+        else cv.INTER_CUBIC
     )
 
-    # CLAHE
+    resized = cv.resize(
+        img,
+        (new_w, new_h),
+        interpolation=interpolation
+    )
+
+    canvas = np.zeros(
+        (target_size, target_size, 3),
+        dtype=np.uint8
+    )
+
+    x_offset = (target_size - new_w) // 2
+    y_offset = (target_size - new_h) // 2
+
+    canvas[
+        y_offset:y_offset + new_h,
+        x_offset:x_offset + new_w
+    ] = resized
+
+    return canvas
+
+
+# =========================================================
+# 3. ILLUMINATION CORRECTION
+# =========================================================
+
+def illumination_correction(img_bgr):
+    """
+    Mild illumination correction.
+    Avoid aggressive Retinex because ripeness depends on colour.
+    """
+
+    lab = cv.cvtColor(img_bgr, cv.COLOR_BGR2LAB)
+
+    L, A, B = cv.split(lab)
+
     clahe = cv.createCLAHE(
         clipLimit=2.0,
         tileGridSize=(8, 8)
     )
 
-    v_enhanced = clahe.apply(v_gamma)
+    L_enhanced = clahe.apply(L)
 
-    enhanced_hsv = cv.merge([
-        h,
-        s,
-        v_enhanced
-    ])
-
-    enhanced_bgr = cv.cvtColor(
-        enhanced_hsv,
-        cv.COLOR_HSV2BGR
+    corrected_lab = cv.merge(
+        [L_enhanced, A, B]
     )
 
-    return enhanced_bgr
-
-# 2. MULTI-SCALE RETINEX
-def multi_scale_retinex(
-    img,
-    sigmas=[15, 80]
-):
-    """
-    Shadow and illumination correction
-    using Multi-Scale Retinex.
-    """
-
-    img_float = img.astype(
-        np.float32
-    ) + 1.0
-
-    msr = np.zeros_like(
-        img_float
+    corrected = cv.cvtColor(
+        corrected_lab,
+        cv.COLOR_LAB2BGR
     )
 
-    for sigma in sigmas:
+    return corrected
 
-        blur = cv.GaussianBlur(
-            img_float,
-            (0, 0),
-            sigma
-        )
 
-        msr += (
-            np.log10(img_float)
-            -
-            np.log10(blur + 1e-5)
-        )
+# =========================================================
+# 4. DENOISING
+# =========================================================
 
-    msr = msr / len(sigmas)
-
-    # Normalize each colour channel
-    for i in range(3):
-
-        msr_c = msr[:, :, i]
-
-        min_v = np.min(msr_c)
-        max_v = np.max(msr_c)
-
-        if max_v > min_v:
-
-            msr[:, :, i] = (
-                (msr_c - min_v)
-                /
-                (max_v - min_v)
-                *
-                255.0
-            )
-
-    return np.clip(
-        msr,
-        0,
-        255
-    ).astype(np.uint8)
-
-# 3. DENOISING
-def apply_nlm_denoising(img):
+def denoise_image(img_bgr):
     """
-    Fast bilateral denoising that
-    preserves texture edges.
+    Mild bilateral filtering.
+    Preserves edges and colour better than aggressive smoothing.
     """
 
     return cv.bilateralFilter(
-        img,
+        img_bgr,
         d=5,
-        sigmaColor=50,
-        sigmaSpace=50
+        sigmaColor=40,
+        sigmaSpace=40
     )
 
-# 4. FOREGROUND SEGMENTATION
-def apply_grabcut(img):
+
+# =========================================================
+# 5. FOREGROUND MASK
+# =========================================================
+
+def create_mango_mask(img_bgr):
     """
-    Foreground segmentation using
-    Otsu thresholding and morphological cleanup.
+    GrabCut foreground segmentation.
+    Since XML already provides mango ROI,
+    mango should be near the centre.
     """
 
-    gray = cv.cvtColor(
-        img,
-        cv.COLOR_BGR2GRAY
+    h, w = img_bgr.shape[:2]
+
+    mask = np.zeros(
+        (h, w),
+        dtype=np.uint8
     )
 
-    # Otsu automatic threshold
-    _, mask = cv.threshold(
-        gray,
-        0,
-        1,
-        cv.THRESH_BINARY
-        +
-        cv.THRESH_OTSU
+    margin_x = max(2, int(w * 0.03))
+    margin_y = max(2, int(h * 0.03))
+
+    rect_w = w - 2 * margin_x
+    rect_h = h - 2 * margin_y
+
+    if rect_w <= 0 or rect_h <= 0:
+        return np.ones((h, w), dtype=np.uint8)
+
+    rect = (
+        margin_x,
+        margin_y,
+        rect_w,
+        rect_h
     )
 
-    # Morphological cleanup
+    bg_model = np.zeros(
+        (1, 65),
+        np.float64
+    )
+
+    fg_model = np.zeros(
+        (1, 65),
+        np.float64
+    )
+
+    try:
+        cv.grabCut(
+            img_bgr,
+            mask,
+            rect,
+            bg_model,
+            fg_model,
+            5,
+            cv.GC_INIT_WITH_RECT
+        )
+
+        binary_mask = np.where(
+            (mask == cv.GC_FGD) |
+            (mask == cv.GC_PR_FGD),
+            1,
+            0
+        ).astype(np.uint8)
+
+    except cv.error:
+        binary_mask = np.ones(
+            (h, w),
+            dtype=np.uint8
+        )
+
     kernel = cv.getStructuringElement(
         cv.MORPH_ELLIPSE,
-        (7, 7)
+        (5, 5)
     )
 
-    mask = cv.morphologyEx(
-        mask,
+    binary_mask = cv.morphologyEx(
+        binary_mask,
         cv.MORPH_CLOSE,
         kernel
     )
 
-    segmented_img = (
-        img
-        *
-        mask[:, :, np.newaxis]
+    binary_mask = cv.morphologyEx(
+        binary_mask,
+        cv.MORPH_OPEN,
+        kernel
     )
 
-    return segmented_img, mask
+    if np.sum(binary_mask) < 50:
+        binary_mask = np.ones(
+            (h, w),
+            dtype=np.uint8
+        )
 
-# 5. CIE LAB CONVERSION
-def convert_to_cielab(img_bgr):
+    return binary_mask
+
+
+# =========================================================
+# 6. LAB COLOR FEATURES
+# =========================================================
+
+def extract_lab_features(img_bgr, mask):
     """
-    Convert image from BGR into
-    CIE Lab colour space.
+    Extract Lab colour statistics + histograms.
+    a* represents green-red information.
+    b* represents blue-yellow information.
     """
 
-    return cv.cvtColor(
+    lab = cv.cvtColor(
         img_bgr,
         cv.COLOR_BGR2LAB
     )
 
-# 6. LBP + COLOUR FEATURE EXTRACTION
-def extract_high_accuracy_features(
-    lab_img,
-    mask
-):
-    """
-    Extracts:
+    L, A, B = cv.split(lab)
 
-    1. LBP texture features
-    2. Mean a* colour
-    3. Standard deviation a*
-    4. Mean b* colour
-    5. Standard deviation b*
-    """
+    valid = mask > 0
 
-    l_chan, a_chan, b_chan = cv.split(
-        lab_img
+    if not np.any(valid):
+        valid = np.ones_like(mask, dtype=bool)
+
+    a_values = A[valid]
+    b_values = B[valid]
+
+    # Statistics
+    lab_stats = np.array([
+        np.mean(a_values),
+        np.std(a_values),
+        np.mean(b_values),
+        np.std(b_values)
+    ], dtype=np.float32)
+
+    mask_cv = (
+        mask.astype(np.uint8) * 255
     )
 
-    # LBP Texture 
+    # Histograms
+    a_hist = cv.calcHist(
+        [A],
+        [0],
+        mask_cv,
+        [16],
+        [0, 256]
+    ).flatten()
+
+    b_hist = cv.calcHist(
+        [B],
+        [0],
+        mask_cv,
+        [16],
+        [0, 256]
+    ).flatten()
+
+    if np.sum(a_hist) > 0:
+        a_hist = a_hist / np.sum(a_hist)
+
+    if np.sum(b_hist) > 0:
+        b_hist = b_hist / np.sum(b_hist)
+
+    return np.hstack([
+        lab_stats,
+        a_hist,
+        b_hist
+    ])
+
+
+# =========================================================
+# 7. HSV COLOR FEATURES
+# =========================================================
+
+def extract_hsv_features(img_bgr, mask):
+    """
+    HSV histogram useful for distinguishing
+    green / yellow / brown colour distributions.
+    """
+
+    hsv = cv.cvtColor(
+        img_bgr,
+        cv.COLOR_BGR2HSV
+    )
+
+    H, S, V = cv.split(hsv)
+
+    mask_cv = (
+        mask.astype(np.uint8) * 255
+    )
+
+    h_hist = cv.calcHist(
+        [H],
+        [0],
+        mask_cv,
+        [18],
+        [0, 180]
+    ).flatten()
+
+    s_hist = cv.calcHist(
+        [S],
+        [0],
+        mask_cv,
+        [8],
+        [0, 256]
+    ).flatten()
+
+    if np.sum(h_hist) > 0:
+        h_hist = h_hist / np.sum(h_hist)
+
+    if np.sum(s_hist) > 0:
+        s_hist = s_hist / np.sum(s_hist)
+
+    return np.hstack([
+        h_hist,
+        s_hist
+    ])
+
+
+# =========================================================
+# 8. GREEN / YELLOW / DARK PIXEL RATIOS
+# =========================================================
+
+def extract_color_ratios(img_bgr, mask):
+
+    hsv = cv.cvtColor(
+        img_bgr,
+        cv.COLOR_BGR2HSV
+    )
+
+    H, S, V = cv.split(hsv)
+
+    valid = mask > 0
+
+    if not np.any(valid):
+        return np.zeros(
+            3,
+            dtype=np.float32
+        )
+
+    h = H[valid]
+    s = S[valid]
+    v = V[valid]
+
+    # Detect green mango pixels
+    green = (
+        (h >= 35) &
+        (h <= 85) &
+        (s > 40) &
+        (v > 40)
+    )
+
+    # Detect yellow and orange ripe mango pixels
+    yellow = (
+        (h >= 10) &
+        (h < 35) &
+        (s > 40) &
+        (v > 60)
+    )
+
+    # Detect dark or brown overripe pixels
+    dark = (
+        v < 90
+    )
+
+    total = len(h)
+
+    green_ratio = (
+        np.sum(green) / total
+    )
+
+    yellow_ratio = (
+        np.sum(yellow) / total
+    )
+
+    dark_ratio = (
+        np.sum(dark) / total
+    )
+
+    return np.array(
+        [
+            green_ratio,
+            yellow_ratio,
+            dark_ratio
+        ],
+        dtype=np.float32
+    )
+
+
+# =========================================================
+# 9. LBP TEXTURE FEATURES
+# =========================================================
+
+def extract_lbp_features(img_bgr, mask):
+    """
+    LBP texture feature.
+    Used as supplementary feature only.
+    """
+
+    gray = cv.cvtColor(
+        img_bgr,
+        cv.COLOR_BGR2GRAY
+    )
+
     radius = 2
-
-    n_points = (
-        8 * radius
-    )
+    n_points = 8 * radius
 
     lbp = local_binary_pattern(
-        l_chan,
+        gray,
         n_points,
         radius,
         method="uniform"
     )
 
-    n_bins_lbp = (
-        n_points + 2
-    )
+    valid = mask > 0
 
-    if np.any(mask > 0):
-
-        lbp_masked = lbp[
-            mask > 0
-        ]
-
+    if np.any(valid):
+        lbp_values = lbp[valid]
     else:
+        lbp_values = lbp.ravel()
 
-        lbp_masked = lbp.ravel()
+    n_bins = n_points + 2
 
-    lbp_hist, _ = np.histogram(
-        lbp_masked,
-        bins=n_bins_lbp,
-        range=(
-            0,
-            n_bins_lbp
-        ),
+    hist, _ = np.histogram(
+        lbp_values,
+        bins=n_bins,
+        range=(0, n_bins),
         density=True
     )
 
-    # CIE Lab Colour Statistics
-    if np.any(mask > 0):
+    return hist.astype(np.float32), lbp
 
-        valid_a = a_chan[
-            mask > 0
-        ]
 
-        valid_b = b_chan[
-            mask > 0
-        ]
+# =========================================================
+# 10. COMBINED FEATURE EXTRACTION
+# =========================================================
 
-    else:
-
-        valid_a = a_chan.ravel()
-
-        valid_b = b_chan.ravel()
-
-    color_stats = np.array([
-        np.mean(valid_a),
-        np.std(valid_a),
-        np.mean(valid_b),
-        np.std(valid_b)
-    ])
-
-    # Combine LBP + Lab features
-    combined_features = np.hstack([
-        lbp_hist,
-        color_stats
-    ])
-
-    return combined_features, lbp
-
-# 7. COMPLETE IMAGE PROCESSING PIPELINE
-def process_mango_image(img_bgr):
+def extract_features(original_crop):
     """
-    Runs exactly the preprocessing sequence
-    used by the SVM training pipeline.
+    Main feature extraction pipeline.
 
-    Input:
-        OpenCV BGR image
-
-    Output:
-        features
-        intermediate images
+    Colour features are extracted from mildly corrected image.
+    Texture features are supplementary.
     """
 
-    # Resize 
-    crop = cv.resize(
-        img_bgr,
-        (224, 224)
+    resized = resize_with_padding(
+        original_crop,
+        target_size=224
     )
 
-    # 1. Multi-Scale Retinex
-    msr_img = multi_scale_retinex(
-        crop
+    corrected = illumination_correction(
+        resized
     )
 
-    # 2. CLAGC
-    enhanced_img = apply_clagc(
-        msr_img
+    denoised = denoise_image(
+        corrected
     )
 
-    # 3. Denoising
-    denoised_img = apply_nlm_denoising(
-        enhanced_img
+    mask = create_mango_mask(
+        denoised
     )
 
-    # 4. Segmentation
-    segmented_img, mask = apply_grabcut(
-        denoised_img
+    # Colour
+    lab_features = extract_lab_features(
+        corrected,
+        mask
     )
 
-    # 5. CIE Lab
-    lab_img = convert_to_cielab(
-        segmented_img
+    hsv_features = extract_hsv_features(
+        corrected,
+        mask
     )
 
-    # 6. Feature extraction
-    features, lbp_viz = (
-        extract_high_accuracy_features(
-            lab_img,
-            mask
+    color_ratios = extract_color_ratios(
+        corrected,
+        mask
+    )
+
+    # Texture
+    lbp_features, lbp_img = extract_lbp_features(
+        denoised,
+        mask
+    )
+
+    combined = np.hstack([
+        lab_features,
+        hsv_features,
+        color_ratios,
+        lbp_features
+    ])
+
+    segmented = (
+        denoised *
+        mask[:, :, np.newaxis]
+    )
+
+    return (
+        combined,
+        resized,
+        corrected,
+        denoised,
+        mask,
+        segmented,
+        lbp_img
+    )
+    
+def process_mango_image(image_bgr):
+    if image_bgr is None:
+        raise ValueError(
+            "Image could not be decoded."
         )
+
+    image_bgr = np.asarray(image_bgr)
+
+    if image_bgr.ndim != 3:
+        raise ValueError(
+            f"Expected a 3D BGR image, "
+            f"received shape {image_bgr.shape}"
+        )
+
+    if image_bgr.shape[2] != 3:
+        raise ValueError(
+            f"Expected 3 colour channels, "
+            f"received shape {image_bgr.shape}"
+        )
+
+    (
+        features,
+        resized,
+        corrected,
+        denoised,
+        mask,
+        segmented,
+        lbp_img
+    ) = extract_features(
+        image_bgr
+    )
+
+    features = np.asarray(
+        features,
+        dtype=np.float32
+    ).flatten()
+
+    if features.shape[0] != 83:
+        raise ValueError(
+            f"Expected 83 features, "
+            f"but got {features.shape[0]}."
+        )
+
+    # CIE Lab image for app visualization
+    lab_img = cv.cvtColor(
+        corrected,
+        cv.COLOR_BGR2LAB
     )
 
     return {
         "features": features,
-        "original": crop,
-        "msr": msr_img,
-        "clagc": enhanced_img,
-        "denoised": denoised_img,
-        "segmented": segmented_img,
+        "original": resized,
+        "corrected": corrected,
+        "denoised": denoised,
+        "mask": mask,
+        "segmented": segmented,
         "lab": lab_img,
-        "lbp": lbp_viz,
-        "mask": mask
+        "lbp": lbp_img,
     }
