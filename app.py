@@ -2,7 +2,11 @@ import streamlit as st
 import joblib
 import cv2 as cv
 import numpy as np
+import io
+import tempfile
+import os
 
+from fpdf import FPDF
 from ultralytics import YOLO
 from mango_processing import process_mango_image
 
@@ -339,6 +343,7 @@ def remove_duplicate_boxes(
             )
 
     return unique_boxes
+
 
 
 # Detect mangoes using YOLO and classify using SVM
@@ -872,6 +877,89 @@ def detect_and_classify_mangoes(
         output_image,
         mango_results
     )
+
+# Function to generate PDF bytes from analysis results (including images)
+def create_pdf_report(filename, quality_info, results, annotated_img_bgr):
+    pdf = FPDF()
+    pdf.add_page()
+    
+    # Title
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.cell(0, 10, "Mango Ripeness Analysis Report", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.ln(5)
+    
+    # File Metadata
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, f"File Name: {filename}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+    
+    # Quality Assessment Table Header
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, "1. Image Quality Assessment", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    
+    pdf.cell(60, 7, f"Brightness: {quality_info['brightness']:.1f} ({quality_info['brightness_status']})", border=1)
+    pdf.cell(60, 7, f"Sharpness: {quality_info['sharpness']:.1f} ({quality_info['sharpness_status']})", border=1)
+    pdf.cell(70, 7, f"Resolution: {quality_info['width']}x{quality_info['height']} ({quality_info['resolution_status']})", border=1, new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(5)
+
+    # Save and embed main annotated image
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, "2. Annotated Detection Image", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
+        annotated_rgb = cv.cvtColor(annotated_img_bgr, cv.COLOR_BGR2RGB)
+        cv.imwrite(tmp_file.name, annotated_rgb)
+        temp_img_path = tmp_file.name
+
+    pdf.image(temp_img_path, w=140)
+    os.remove(temp_img_path)
+    pdf.ln(5)
+    
+    # Summary Table Header
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, f"3. Detection Findings (Total Detected: {len(results)})", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "B", 10)
+    
+    # Columns Header
+    pdf.cell(30, 8, "Mango ID", border=1)
+    pdf.cell(50, 8, "Predicted Class", border=1)
+    pdf.cell(55, 8, "SVM Confidence", border=1)
+    pdf.cell(55, 8, "YOLO Confidence", border=1, new_x="LMARGIN", new_y="NEXT")
+    
+    # Rows Data
+    pdf.set_font("Helvetica", "", 10)
+    for mango in results:
+        svm_conf = f"{mango['confidence']:.2f}%" if mango['confidence'] is not None else "N/A"
+        yolo_conf = f"{mango['detection_confidence'] * 100:.2f}%"
+        
+        pdf.cell(30, 8, f"Mango {mango['id']}", border=1)
+        pdf.cell(50, 8, str(mango['class']).upper(), border=1)
+        pdf.cell(55, 8, svm_conf, border=1)
+        pdf.cell(55, 8, yolo_conf, border=1, new_x="LMARGIN", new_y="NEXT")
+
+    # Add Cropped Mango Images Section
+    pdf.ln(5)
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, "4. Individual Mango Crops", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+
+    for mango in results:
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_crop:
+            crop_rgb = cv.cvtColor(mango["roi"], cv.COLOR_BGR2RGB)
+            cv.imwrite(tmp_crop.name, crop_rgb)
+            crop_path = tmp_crop.name
+
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(0, 6, f"Mango {mango['id']} ({str(mango['class']).upper()})", new_x="LMARGIN", new_y="NEXT")
+        pdf.image(crop_path, w=40)
+        os.remove(crop_path)
+        pdf.ln(3)
+
+    pdf_buffer = io.BytesIO()
+    pdf.output(pdf_buffer)
+    return pdf_buffer.getvalue()
 
 
 # Initialise Streamlit session state
@@ -1569,146 +1657,97 @@ if uploaded_image is not None:
                 use_container_width=True
             )
 
-            # Display selected mango classification
+# Display selected mango classification
             st.divider()
-
 
             st.header(
                 "🥭 Selected Mango Classification"
             )
 
-
             result1, result2, result3, result4 = (
                 st.columns(4)
             )
 
-
             with result1:
-
                 st.metric(
                     "Mango",
                     selected_mango_label
                 )
 
-
             with result2:
-
                 st.metric(
                     "Predicted Class",
-                    str(
-                        selected_mango[
-                            "class"
-                        ]
-                    )
+                    str(selected_mango["class"])
                 )
 
-
             with result3:
-
-                if (
-                    selected_mango[
-                        "confidence"
-                    ]
-                    is not None
-                ):
-
+                if selected_mango["confidence"] is not None:
                     st.metric(
                         "SVM Confidence",
-                        (
-                            f"{selected_mango['confidence']:.2f}%"
-                        )
+                        f"{selected_mango['confidence']:.2f}%"
                     )
-
                 else:
-
                     st.metric(
                         "SVM Confidence",
                         "N/A"
                     )
 
-
             with result4:
-
                 st.metric(
                     "YOLO Confidence",
-                    (
-                        f"{selected_mango['detection_confidence'] * 100:.2f}%"
-                    )
+                    f"{selected_mango['detection_confidence'] * 100:.2f}%"
                 )
+
+            # Define selected_class properly
+            selected_class = str(selected_mango["class"]).strip().lower()
 
             if selected_class == "ripe":
-
-                st.success(
-                    "✅ This mango is "
-                    "classified as RIPE."
-                )
-
+                st.success("✅ This mango is classified as RIPE.")
 
             elif selected_class == "unripe":
+                st.warning("🟢 This mango is classified as UNRIPE.")
 
-                st.warning(
-                    "🟢 This mango is "
-                    "classified as UNRIPE."
-                )
+            elif selected_class in ["over ripe", "overripe"]:
+                st.error("🔴 This mango is classified as OVER RIPE.")
 
-
-            elif selected_class in [
-                "over ripe",
-                "overripe"
-            ]:
-
-                st.error(
-                    "🔴 This mango is "
-                    "classified as OVER RIPE."
-                )
-
-
-            elif (
-                selected_class
-                ==
-                "partially ripe"
-            ):
-
-                st.info(
-                    "🟠 This mango is "
-                    "classified as PARTIALLY RIPE."
-                )
-
+            elif selected_class == "partially ripe":
+                st.info("🟠 This mango is classified as PARTIALLY RIPE.")
 
             else:
+                st.info(f"Prediction: {selected_mango['class']}")
 
-                st.info(
-                    f"Prediction: "
-                    f"{selected_mango['class']}"
-                )
+            # Export Results to PDF
+            st.divider()
+            st.subheader("📄 Export Results")
 
+            pdf_bytes = create_pdf_report(
+                st.session_state.analysed_filename,
+                quality,
+                st.session_state.mango_results,
+                st.session_state.annotated_image
+            )
+
+            st.download_button(
+                label="📥 Download Summary PDF Report",
+                data=pdf_bytes,
+                file_name=f"Mango_Analysis_Report_{st.session_state.analysed_filename}.pdf",
+                mime="application/pdf",
+                type="primary"
+            )
 
             # Reset the application
             st.divider()
-
 
             if st.button(
                 "🔄 Analyse Another Image",
                 key="analyse_another_image"
             ):
-
                 st.session_state.uploader_key += 1
-
                 st.session_state.mango_results = None
-
                 st.session_state.annotated_image = None
-
                 st.session_state.analysed_filename = None
 
-
-                if (
-                    "selected_mango"
-                    in st.session_state
-                ):
-
-                    del st.session_state[
-                        "selected_mango"
-                    ]
-
+                if "selected_mango" in st.session_state:
+                    del st.session_state["selected_mango"]
 
                 st.rerun()
