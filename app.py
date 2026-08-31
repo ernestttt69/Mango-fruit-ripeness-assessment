@@ -878,7 +878,7 @@ def detect_and_classify_mangoes(
         mango_results
     )
 
-# Function to generate PDF bytes from analysis results (including images)
+# Function to generate PDF from analysis results (including images)
 def create_pdf_report(filename, quality_info, results, annotated_img_bgr):
     pdf = FPDF()
     pdf.add_page()
@@ -903,14 +903,13 @@ def create_pdf_report(filename, quality_info, results, annotated_img_bgr):
     pdf.cell(70, 7, f"Resolution: {quality_info['width']}x{quality_info['height']} ({quality_info['resolution_status']})", border=1, new_x="LMARGIN", new_y="NEXT")
     pdf.ln(5)
 
-    # Save and embed main annotated image
+    # Save and embed main annotated image (Write BGR directly to file)
     pdf.set_font("Helvetica", "B", 14)
     pdf.cell(0, 8, "2. Annotated Detection Image", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(2)
 
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
-        annotated_rgb = cv.cvtColor(annotated_img_bgr, cv.COLOR_BGR2RGB)
-        cv.imwrite(tmp_file.name, annotated_rgb)
+        cv.imwrite(tmp_file.name, annotated_img_bgr)
         temp_img_path = tmp_file.name
 
     pdf.image(temp_img_path, w=140)
@@ -939,7 +938,7 @@ def create_pdf_report(filename, quality_info, results, annotated_img_bgr):
         pdf.cell(55, 8, svm_conf, border=1)
         pdf.cell(55, 8, yolo_conf, border=1, new_x="LMARGIN", new_y="NEXT")
 
-    # Add Cropped Mango Images Section
+    # Add Cropped Mango Images Section (Write BGR directly to file)
     pdf.ln(5)
     pdf.set_font("Helvetica", "B", 14)
     pdf.cell(0, 8, "4. Individual Mango Crops", new_x="LMARGIN", new_y="NEXT")
@@ -947,8 +946,7 @@ def create_pdf_report(filename, quality_info, results, annotated_img_bgr):
 
     for mango in results:
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_crop:
-            crop_rgb = cv.cvtColor(mango["roi"], cv.COLOR_BGR2RGB)
-            cv.imwrite(tmp_crop.name, crop_rgb)
+            cv.imwrite(tmp_crop.name, mango["roi"])
             crop_path = tmp_crop.name
 
         pdf.set_font("Helvetica", "B", 10)
@@ -969,22 +967,6 @@ if (
 ):
 
     st.session_state.uploader_key = 0
-
-
-if (
-    "uploaded_images"
-    not in st.session_state
-):
-
-    st.session_state.uploaded_images = []
-
-
-if (
-    "current_image_index"
-    not in st.session_state
-):
-
-    st.session_state.current_image_index = 0
 
 
 if (
@@ -1011,33 +993,9 @@ if (
     st.session_state.analysed_filename = None
 
 
-if (
-    "quality_info"
-    not in st.session_state
-):
-
-    st.session_state.quality_info = None
-
-
-if (
-    "analysis_completed"
-    not in st.session_state
-):
-
-    st.session_state.analysis_completed = False
-
-
-if (
-    "analysis_results"
-    not in st.session_state
-):
-
-    st.session_state.analysis_results = {}
-
-
-# Upload mango images
-uploaded_images = st.file_uploader(
-    "Upload Mango Image(s)",
+# Upload mango image
+uploaded_image = st.file_uploader(
+    "Upload Mango Image",
     type=[
         "jpg",
         "jpeg",
@@ -1046,110 +1004,25 @@ uploaded_images = st.file_uploader(
     key=(
         f"mango_uploader_"
         f"{st.session_state.uploader_key}"
-    ),
-    accept_multiple_files=True
+    )
 )
 
 
-if uploaded_images:
-
-    # Limit uploaded images to a maximum of 4
-    if len(uploaded_images) > 4:
-
-        st.warning(
-            "⚠️ A maximum of 4 images can be uploaded. "
-            "Only the first 4 images will be used."
-        )
-
-        uploaded_images = uploaded_images[:4]
-
-    uploaded_image_names = [
-        image.name
-        for image in uploaded_images
-    ]
-
-    previous_image_names = [
-        image.name
-        for image in st.session_state.uploaded_images
-    ]
-
-    # Reset the analysis workflow when a new set of images is uploaded
-    if uploaded_image_names != previous_image_names:
-
-        st.session_state.uploaded_images = uploaded_images
-        st.session_state.current_image_index = 0
-        st.session_state.mango_results = None
-        st.session_state.annotated_image = None
-        st.session_state.analysed_filename = None
-        st.session_state.quality_info = None
-        st.session_state.analysis_completed = False
-        st.session_state.analysis_results = {}
-
-        if "selected_mango" in st.session_state:
-
-            del st.session_state["selected_mango"]
-
-        st.rerun()
+if uploaded_image is not None:
 
 
-if st.session_state.uploaded_images:
-
-    uploaded_images = st.session_state.uploaded_images
-
-    total_images = len(uploaded_images)
-    current_index = st.session_state.current_image_index
-
-    if current_index >= total_images:
-
-        current_index = total_images - 1
-        st.session_state.current_image_index = current_index
-
-    # Display uploaded image previews
-    st.subheader("📷 Uploaded Image Preview")
-
-    preview_columns = st.columns(total_images)
-
-    for index, uploaded_preview in enumerate(uploaded_images):
-
-        preview_bytes = np.frombuffer(
-            uploaded_preview.getvalue(),
-            dtype=np.uint8
-        )
-
-        preview_image = cv.imdecode(
-            preview_bytes,
-            cv.IMREAD_COLOR
-        )
-
-        if preview_image is not None:
-
-            with preview_columns[index]:
-
-                st.image(
-                    bgr_to_rgb(
-                        preview_image
-                    ),
-                    caption=(
-                        f"Image {index + 1}: "
-                        f"{uploaded_preview.name}"
-                    ),
-                    width=250
-                )
-
-    st.divider()
-
-    # Select the current image
-    uploaded_image = uploaded_images[current_index]
-
+    # Decode the uploaded image
     file_bytes = np.frombuffer(
         uploaded_image.getvalue(),
         dtype=np.uint8
     )
 
+
     image_bgr = cv.imdecode(
         file_bytes,
         cv.IMREAD_COLOR
     )
+
 
     if image_bgr is None:
 
@@ -1159,31 +1032,60 @@ if st.session_state.uploaded_images:
 
         st.stop()
 
-    # Display current image
+
+    # Clear results when a different image is uploaded
+    if (
+        st.session_state.analysed_filename
+        is not None
+        and
+        st.session_state.analysed_filename
+        != uploaded_image.name
+    ):
+
+        st.session_state.mango_results = None
+
+        st.session_state.annotated_image = None
+
+        st.session_state.analysed_filename = None
+
+
+        if (
+            "selected_mango"
+            in st.session_state
+        ):
+
+            del st.session_state[
+                "selected_mango"
+            ]
+
+
+    # Display uploaded image
     st.subheader(
-        f"📷 Current Image "
-        f"({current_index + 1} of {total_images})"
+        "📷 Uploaded Image"
     )
+
 
     st.image(
         bgr_to_rgb(
             image_bgr
         ),
         caption=(
-            f"Input Mango Image: "
-            f"{uploaded_image.name}"
+            "Input Mango Image"
         ),
-        width=500
+        use_container_width=True
     )
+
 
     # Assess image quality
     quality = check_image_quality(
         image_bgr
     )
 
+
     st.subheader(
         "🖼️ Image Quality Assessment"
     )
+
 
     q1, q2, q3 = st.columns(3)
 
@@ -1246,86 +1148,64 @@ if st.session_state.uploaded_images:
 
 
     # Analyse the uploaded image
-    if not st.session_state.analysis_completed:
+    if st.button(
+        "Analyse Mango",
+        type="primary",
+        key="analyse_mango"
+    ):
 
-        if st.button(
-            "Analyse Mango",
-            type="primary",
-            key=f"analyse_mango_{current_index}"
-        ):
+        try:
 
-            try:
+            with st.spinner(
+                "Detecting and classifying mangoes..."
+            ):
 
-                with st.spinner(
-                    "Detecting and classifying mangoes..."
-                ):
-
-                    (
-                        annotated_image,
-                        mango_results
-                    ) = detect_and_classify_mangoes(
-                        image_bgr
-                    )
-
-
-                st.session_state.annotated_image = (
-                    annotated_image
-                )
-
-
-                st.session_state.mango_results = (
+                (
+                    annotated_image,
                     mango_results
+                ) = detect_and_classify_mangoes(
+                    image_bgr
                 )
 
 
-                st.session_state.analysed_filename = (
-                    uploaded_image.name
-                )
+            st.session_state.annotated_image = (
+                annotated_image
+            )
 
 
-                st.session_state.quality_info = (
-                    quality
-                )
+            st.session_state.mango_results = (
+                mango_results
+            )
 
 
-                st.session_state.analysis_completed = True
+            st.session_state.analysed_filename = (
+                uploaded_image.name
+            )
 
 
-                st.session_state.analysis_results[
-                    current_index
-                ] = {
-                    "filename": uploaded_image.name,
-                    "quality": quality,
-                    "mango_results": mango_results,
-                    "annotated_image": annotated_image
-                }
+            if (
+                "selected_mango"
+                in st.session_state
+            ):
 
-
-                if (
+                del st.session_state[
                     "selected_mango"
-                    in st.session_state
-                ):
-
-                    del st.session_state[
-                        "selected_mango"
-                    ]
+                ]
 
 
-                st.rerun()
+            st.rerun()
 
 
-            except Exception as e:
+        except Exception as e:
 
-                st.error(
-                    f"Image processing error: "
-                    f"{type(e).__name__}: {e}"
-                )
+            st.error(
+                f"Image processing error: "
+                f"{type(e).__name__}: {e}"
+            )
 
 
     # Display saved analysis results
     if (
-        st.session_state.analysis_completed
-        and
         st.session_state.mango_results
         is not None
     ):
@@ -1337,11 +1217,6 @@ if st.session_state.uploaded_images:
 
         annotated_image = (
             st.session_state.annotated_image
-        )
-
-
-        quality = (
-            st.session_state.quality_info
         )
 
 
@@ -1371,7 +1246,7 @@ if st.session_state.uploaded_images:
                     "Detected Mangoes "
                     "with Ripeness Labels"
                 ),
-                width=600
+                use_container_width=True
             )
 
 
@@ -1537,7 +1412,7 @@ if st.session_state.uploaded_images:
             selected_mango_label = st.selectbox(
                 "Select Mango",
                 mango_options,
-                key=f"selected_mango_{current_index}"
+                key="selected_mango"
             )
 
 
@@ -1584,7 +1459,7 @@ if st.session_state.uploaded_images:
                     f"{selected_mango_label} "
                     f"YOLO ROI"
                 ),
-                width=400
+                use_container_width=True
             )
 
 
@@ -1610,7 +1485,7 @@ if st.session_state.uploaded_images:
                         "Resize + Padding "
                         "(224 × 224)"
                     ),
-                    width=400
+                    use_container_width=True
                 )
 
 
@@ -1631,7 +1506,7 @@ if st.session_state.uploaded_images:
                         "CLAHE on CIE Lab "
                         "L* Channel"
                     ),
-                    width=400
+                    use_container_width=True
                 )
 
 
@@ -1655,7 +1530,7 @@ if st.session_state.uploaded_images:
                     caption=(
                         "Bilateral Filter"
                     ),
-                    width=400
+                    use_container_width=True
                 )
 
 
@@ -1685,7 +1560,7 @@ if st.session_state.uploaded_images:
                         "Morphological Refinement"
                     ),
                     clamp=True,
-                    width=400
+                    use_container_width=True
                 )
 
 
@@ -1710,7 +1585,7 @@ if st.session_state.uploaded_images:
                         "Foreground Segmentation "
                         "Result"
                     ),
-                    width=400
+                    use_container_width=True
                 )
 
 
@@ -1737,7 +1612,7 @@ if st.session_state.uploaded_images:
                         "CIE Lab Colour "
                         "Representation"
                     ),
-                    width=400
+                    use_container_width=True
                 )
 
 
@@ -1777,168 +1652,100 @@ if st.session_state.uploaded_images:
                     "Texture Representation"
                 ),
                 clamp=True,
-                width=400
+                use_container_width=True
             )
 
-
-            # Display selected mango classification
+# Display selected mango classification
             st.divider()
-
 
             st.header(
                 "🥭 Selected Mango Classification"
             )
 
-
             result1, result2, result3, result4 = (
                 st.columns(4)
             )
 
-
             with result1:
-
                 st.metric(
                     "Mango",
                     selected_mango_label
                 )
 
-
             with result2:
-
                 st.metric(
                     "Predicted Class",
                     str(selected_mango["class"])
                 )
 
-
             with result3:
-
                 if selected_mango["confidence"] is not None:
-
                     st.metric(
                         "SVM Confidence",
                         f"{selected_mango['confidence']:.2f}%"
                     )
-
                 else:
-
                     st.metric(
                         "SVM Confidence",
                         "N/A"
                     )
 
-
             with result4:
-
                 st.metric(
                     "YOLO Confidence",
                     f"{selected_mango['detection_confidence'] * 100:.2f}%"
                 )
 
-
             # Define selected_class properly
             selected_class = str(selected_mango["class"]).strip().lower()
 
-
             if selected_class == "ripe":
-
                 st.success("✅ This mango is classified as RIPE.")
 
-
             elif selected_class == "unripe":
-
                 st.warning("🟢 This mango is classified as UNRIPE.")
 
-
             elif selected_class in ["over ripe", "overripe"]:
-
                 st.error("🔴 This mango is classified as OVER RIPE.")
 
-
             elif selected_class == "partially ripe":
-
                 st.info("🟠 This mango is classified as PARTIALLY RIPE.")
 
             else:
-
                 st.info(f"Prediction: {selected_mango['class']}")
 
-
-        # Export Results to PDF
-        st.divider()
-        st.subheader("📄 Export Results")
-
-        pdf_bytes = create_pdf_report(
-            st.session_state.analysed_filename,
-            quality,
-            st.session_state.mango_results,
-            st.session_state.annotated_image
-        )
-
-        st.download_button(
-            label="📥 Download Summary PDF Report",
-            data=pdf_bytes,
-            file_name=f"Mango_Analysis_Report_{st.session_state.analysed_filename}.pdf",
-            mime="application/pdf",
-            type="primary",
-            key=f"download_pdf_{current_index}"
-        )
-
-        # Analyse the next image
-        if (
-            current_index
-            <
-            total_images - 1
-        ):
-
+            # Export Results to PDF
             st.divider()
+            st.subheader("📄 Export Results")
 
-            if st.button(
-                f"➡️ Analyse Next Image "
-                f"({current_index + 2} of {total_images})",
-                type="primary",
-                key=f"analyse_next_{current_index}"
-            ):
-
-                st.session_state.current_image_index += 1
-                st.session_state.mango_results = None
-                st.session_state.annotated_image = None
-                st.session_state.analysed_filename = None
-                st.session_state.quality_info = None
-                st.session_state.analysis_completed = False
-
-                if "selected_mango" in st.session_state:
-
-                    del st.session_state["selected_mango"]
-
-                st.rerun()
-
-        else:
-
-            st.divider()
-
-            st.success(
-                f"✅ All {total_images} image(s) "
-                f"have been analysed."
+            pdf_bytes = create_pdf_report(
+                st.session_state.analysed_filename,
+                quality,
+                st.session_state.mango_results,
+                st.session_state.annotated_image
             )
 
+            st.download_button(
+                label="📥 Download Summary PDF Report",
+                data=pdf_bytes,
+                file_name=f"Mango_Analysis_Report_{st.session_state.analysed_filename}.pdf",
+                mime="application/pdf",
+                type="primary"
+            )
+
+            # Reset the application
+            st.divider()
+
             if st.button(
-                "🔄 Analyse Another Image Set",
+                "🔄 Analyse Another Image",
                 key="analyse_another_image"
             ):
-
                 st.session_state.uploader_key += 1
-                st.session_state.uploaded_images = []
-                st.session_state.current_image_index = 0
                 st.session_state.mango_results = None
                 st.session_state.annotated_image = None
                 st.session_state.analysed_filename = None
-                st.session_state.quality_info = None
-                st.session_state.analysis_completed = False
-                st.session_state.analysis_results = {}
 
                 if "selected_mango" in st.session_state:
-
                     del st.session_state["selected_mango"]
 
                 st.rerun()
